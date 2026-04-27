@@ -46,3 +46,6 @@ export GPT_IMAGE_API_KEY="YOUR_API_KEY"
 ```
 
 See [`skills/gpt-imagegen/SKILL.md`](skills/gpt-imagegen/SKILL.md) for full workflow details and command examples.
+
+## Share
+🌅 [2026-04-27] Special Share. Core contributor's share on Linux.do.
