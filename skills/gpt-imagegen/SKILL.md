@@ -176,8 +176,9 @@ Common options:
 ## Notes
 
 - When `--image` is omitted, the script calls `/v1/images/generations` with JSON and requests SSE streaming by default.
-- When one or more `--image` values are provided, the script calls `/v1/images/edits` with multipart uploads and requests SSE streaming by default. Multiple images are sent as repeated `image[]` form fields.
+- When one or more `--image` values are provided, the script calls `/v1/images/edits` with multipart uploads and requests SSE streaming by default. Multiple uploaded images are sent as repeated `image[]` form fields, matching the official multipart examples.
 - HTTPS responses are read in chunks, and streamed image events are parsed from `text/event-stream` responses.
+- Streaming follows the official Images API event shape: `image_generation.partial_image` and `image_edit.partial_image` are treated only as progress events, while `image_generation.completed` and `image_edit.completed` are required for the final saved image. If the stream disconnects after a completed event, the script can still save that final image; if it disconnects with only partial events, the script reports a clear incomplete-stream error.
 - The script no longer writes raw API metadata files. Return the generated image path and concise command output instead.
 - Remote image and mask URLs must pass HTTPS and public-host safety validation before use. The configured API base URL must use HTTPS.
 - If the API returns a retryable gateway or rate-limit error, the script extracts concise error details and can retry when `--retries` is set.

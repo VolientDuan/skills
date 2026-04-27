@@ -32,11 +32,45 @@ PLACEHOLDER_API_KEY = "YOUR_API_KEY"
 DEFAULT_TIMEOUT = 300
 DEFAULT_PARTIAL_IMAGES = 2
 HTTP_READ_CHUNK_SIZE = 1024 * 64
+RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504, 524}
+STREAM_COMPLETED_EVENTS = {
+    "image_generation.completed",
+    "image_edit.completed",
+}
+STREAM_PARTIAL_EVENTS = {
+    "image_generation.partial_image",
+    "image_edit.partial_image",
+}
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+class HTTPResult:
+    def __init__(self, status: int, reason: str, body: bytes) -> None:
+        self.status = status
+        self.reason = reason
+        self.body = body
+
+
+class StreamResult:
+    def __init__(
+        self,
+        status: int,
+        reason: str,
+        events: list[dict],
+        body: bytes,
+        incomplete: bool = False,
+    ) -> None:
+        self.status = status
+        self.reason = reason
+        self.events = events
+        self.body = body
+        self.incomplete = incomplete
+
+
 URL_PATTERN = re.compile(
     r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://"
     r"(?P<authority>[^/?#]*)"
@@ -623,7 +657,7 @@ def http_request(
     timeout: int,
     require_public_resolution: bool = True,
     max_redirects: int = 5,
-) -> tuple[int, str, bytes]:
+) -> HTTPResult:
     parsed = validate_https_url(
         url,
         "Request",
@@ -673,7 +707,7 @@ def http_request(
             max_redirects=max_redirects - 1,
         )
 
-    return response.status, response.reason, response_body
+    return HTTPResult(response.status, response.reason, response_body)
 
 
 def read_response_stream(response: http.client.HTTPResponse) -> bytes:
@@ -750,18 +784,25 @@ class SSEParser:
         return {"type": event_name or "message", "data": parsed}
 
 
-def read_sse_stream(response: http.client.HTTPResponse) -> tuple[list[dict], bytes]:
+def read_sse_stream(response: http.client.HTTPResponse) -> tuple[list[dict], bytes, bool]:
     parser = SSEParser()
     events = []
     raw_parts = []
-    while True:
-        chunk = response.read(HTTP_READ_CHUNK_SIZE)
-        if not chunk:
-            break
-        raw_parts.append(chunk)
-        events.extend(parser.feed(chunk))
+    incomplete = False
+    try:
+        while True:
+            chunk = response.read(HTTP_READ_CHUNK_SIZE)
+            if not chunk:
+                break
+            raw_parts.append(chunk)
+            events.extend(parser.feed(chunk))
+    except http.client.IncompleteRead as exc:
+        incomplete = True
+        if exc.partial:
+            raw_parts.append(exc.partial)
+            events.extend(parser.feed(exc.partial))
     events.extend(parser.close())
-    return events, b"".join(raw_parts)
+    return events, b"".join(raw_parts), incomplete
 
 
 def http_request_sse(
@@ -772,7 +813,7 @@ def http_request_sse(
     timeout: int,
     require_public_resolution: bool = True,
     max_redirects: int = 5,
-) -> tuple[int, str, list[dict], bytes]:
+) -> StreamResult:
     parsed = validate_https_url(
         url,
         "Request",
@@ -796,11 +837,13 @@ def http_request_sse(
         if response.status in {301, 302, 303, 307, 308}:
             response_body = read_response_stream(response)
             events: list[dict] = []
+            incomplete = False
         elif response.status >= 400:
             response_body = read_response_stream(response)
             events = []
+            incomplete = False
         else:
-            events, response_body = read_sse_stream(response)
+            events, response_body, incomplete = read_sse_stream(response)
     except (OSError, http.client.HTTPException) as exc:
         raise RuntimeError(f"Network request failed for {url}: {exc}") from exc
     finally:
@@ -829,7 +872,7 @@ def http_request_sse(
             max_redirects=max_redirects - 1,
         )
 
-    return response.status, response.reason, events, response_body
+    return StreamResult(response.status, response.reason, events, response_body, incomplete)
 
 
 def retry_delay_from_body(response_body: bytes, fallback: int, maximum: int) -> int:
@@ -879,7 +922,6 @@ def request_api_json(
     retry_delay: int,
     max_retry_delay: int,
 ) -> dict:
-    retryable_statuses = {429, 500, 502, 503, 504}
     attempts = max(0, retries) + 1
     last_status = 0
     last_body = b""
@@ -887,7 +929,7 @@ def request_api_json(
 
     for attempt in range(attempts):
         try:
-            status, reason, response_body = http_request(
+            result = http_request(
                 "POST",
                 url,
                 headers,
@@ -901,20 +943,20 @@ def request_api_json(
             time.sleep(max(0, retry_delay))
             continue
 
-        if status < 400:
+        if result.status < 400:
             try:
-                return json.loads(response_body.decode("utf-8"))
+                return json.loads(result.body.decode("utf-8"))
             except json.JSONDecodeError as exc:
                 raise RuntimeError(
-                    f"API response was not valid JSON. HTTP {status} {reason}."
+                    f"API response was not valid JSON. HTTP {result.status} {result.reason}."
                 ) from exc
 
-        last_status = status
-        last_body = response_body
-        last_reason = reason
-        if status not in retryable_statuses or attempt + 1 >= attempts:
+        last_status = result.status
+        last_body = result.body
+        last_reason = result.reason
+        if result.status not in RETRYABLE_HTTP_STATUSES or attempt + 1 >= attempts:
             break
-        time.sleep(retry_delay_from_body(response_body, retry_delay, max_retry_delay))
+        time.sleep(retry_delay_from_body(result.body, retry_delay, max_retry_delay))
 
     raise RuntimeError(
         f"API request failed with HTTP {last_status}: "
@@ -931,7 +973,6 @@ def request_api_stream(
     retry_delay: int,
     max_retry_delay: int,
 ) -> list[dict] | dict:
-    retryable_statuses = {429, 500, 502, 503, 504, 524}
     attempts = max(0, retries) + 1
     last_status = 0
     last_body = b""
@@ -939,7 +980,7 @@ def request_api_stream(
 
     for attempt in range(attempts):
         try:
-            status, reason, events, response_body = http_request_sse(
+            result = http_request_sse(
                 "POST",
                 url,
                 headers,
@@ -953,26 +994,34 @@ def request_api_stream(
             time.sleep(max(0, retry_delay))
             continue
 
-        if status < 400:
-            if events:
-                stream_error = stream_error_from_events(events)
+        if result.status < 400:
+            if result.events:
+                stream_error = stream_error_from_events(result.events)
                 if stream_error:
                     raise RuntimeError(f"API stream returned an error: {stream_error}")
-                return events
+                if has_completed_image_event(result.events):
+                    return result.events
+                if result.incomplete:
+                    raise RuntimeError(
+                        "API stream ended before a completed image event. "
+                        f"Received {count_stream_events(result.events, STREAM_PARTIAL_EVENTS)} "
+                        "partial image event(s)."
+                    )
+                return result.events
             try:
-                return json.loads(response_body.decode("utf-8"))
+                return json.loads(result.body.decode("utf-8"))
             except json.JSONDecodeError as exc:
                 raise RuntimeError(
                     f"API stream response did not include SSE events or valid JSON. "
-                    f"HTTP {status} {reason}."
+                    f"HTTP {result.status} {result.reason}."
                 ) from exc
 
-        last_status = status
-        last_body = response_body
-        last_reason = reason
-        if status not in retryable_statuses or attempt + 1 >= attempts:
+        last_status = result.status
+        last_body = result.body
+        last_reason = result.reason
+        if result.status not in RETRYABLE_HTTP_STATUSES or attempt + 1 >= attempts:
             break
-        time.sleep(retry_delay_from_body(response_body, retry_delay, max_retry_delay))
+        time.sleep(retry_delay_from_body(result.body, retry_delay, max_retry_delay))
 
     raise RuntimeError(
         f"API stream request failed with HTTP {last_status}: "
@@ -994,6 +1043,18 @@ def stream_error_from_events(events: list[dict]) -> str:
                 return str(message)
             return str(event)
     return ""
+
+
+def event_type(event: dict) -> str:
+    return str(event.get("type") or event.get("event") or "").lower()
+
+
+def has_completed_image_event(events: list[dict]) -> bool:
+    return any(event_type(event) in STREAM_COMPLETED_EVENTS for event in events)
+
+
+def count_stream_events(events: list[dict], names: set[str]) -> int:
+    return sum(1 for event in events if event_type(event) in names)
 
 
 def request_json(
@@ -1113,7 +1174,7 @@ def download_url(url: str, timeout: int, user_agent: str = DEFAULT_USER_AGENT) -
     validate_https_url(url, "Image")
     headers = request_headers(user_agent=user_agent)
     headers["Accept"] = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
-    status, reason, response_body = http_request(
+    result = http_request(
         "GET",
         url,
         headers,
@@ -1121,9 +1182,11 @@ def download_url(url: str, timeout: int, user_agent: str = DEFAULT_USER_AGENT) -
         timeout,
         require_public_resolution=True,
     )
-    if status >= 400:
-        raise RuntimeError(f"Image download failed with HTTP {status}: {reason}")
-    return response_body
+    if result.status >= 400:
+        raise RuntimeError(
+            f"Image download failed with HTTP {result.status}: {result.reason}"
+        )
+    return result.body
 
 
 def png_chunks(data: bytes):
@@ -1289,51 +1352,49 @@ def image_bytes_from_response(
     if not isinstance(first, dict):
         raise RuntimeError("API response data[0] is not an object.")
 
-    b64_image = first.get("b64_json") or first.get("image_base64")
-    if b64_image:
+    return image_bytes_from_image_object(first, timeout, user_agent)
+
+
+def image_bytes_from_image_object(
+    item: dict, timeout: int, user_agent: str = DEFAULT_USER_AGENT
+) -> bytes:
+    b64_image = item.get("b64_json") or item.get("image_base64")
+    if isinstance(b64_image, str) and b64_image:
         return base64.b64decode(b64_image)
 
-    image_url = first.get("url")
-    if image_url:
+    image_url = item.get("url")
+    if isinstance(image_url, str) and image_url:
         return download_url(image_url, timeout, user_agent)
 
-    raise RuntimeError("API response did not include b64_json or url for the image.")
+    raise RuntimeError("Image result did not include b64_json or url.")
 
 
 def image_bytes_from_stream_events(
     events: list[dict], timeout: int, user_agent: str = DEFAULT_USER_AGENT
 ) -> bytes:
-    last_b64 = ""
-    last_url = ""
+    completed_items = []
+    partial_count = 0
     for event in events:
-        b64_image = (
-            event.get("b64_json")
-            or event.get("image_base64")
-            or event.get("partial_image_b64")
-        )
-        if isinstance(b64_image, str) and b64_image:
-            last_b64 = b64_image
-        image_url = event.get("url")
-        if isinstance(image_url, str) and image_url:
-            last_url = image_url
+        kind = event_type(event)
+        if kind in STREAM_PARTIAL_EVENTS:
+            partial_count += 1
+            continue
+        if kind not in STREAM_COMPLETED_EVENTS:
+            continue
 
+        if isinstance(event.get("b64_json"), str) or isinstance(event.get("url"), str):
+            completed_items.append(event)
         nested_data = event.get("data")
         if isinstance(nested_data, list):
-            for item in nested_data:
-                if not isinstance(item, dict):
-                    continue
-                nested_b64 = item.get("b64_json") or item.get("image_base64")
-                if isinstance(nested_b64, str) and nested_b64:
-                    last_b64 = nested_b64
-                nested_url = item.get("url")
-                if isinstance(nested_url, str) and nested_url:
-                    last_url = nested_url
+            completed_items.extend(item for item in nested_data if isinstance(item, dict))
 
-    if last_b64:
-        return base64.b64decode(last_b64)
-    if last_url:
-        return download_url(last_url, timeout, user_agent)
-    raise RuntimeError("API stream did not include b64_json or url for the image.")
+    if completed_items:
+        return image_bytes_from_image_object(completed_items[-1], timeout, user_agent)
+
+    raise RuntimeError(
+        "API stream did not include a completed image event with b64_json or url. "
+        f"Received {partial_count} partial image event(s)."
+    )
 
 
 def prompt_needs_fictional_watermark(prompt: str, mode: str) -> bool:
