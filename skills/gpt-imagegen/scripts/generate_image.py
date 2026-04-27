@@ -28,6 +28,8 @@ DEFAULT_BASE_URL = ""
 RECOMMENDED_BASE_URL = "https://examine.com"
 DEFAULT_MODEL = "gpt-image-2"
 PLACEHOLDER_API_KEY = "YOUR_API_KEY"
+DEFAULT_TIMEOUT = 300
+HTTP_READ_CHUNK_SIZE = 1024 * 64
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -199,8 +201,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=180,
-        help="Request timeout in seconds.",
+        default=DEFAULT_TIMEOUT,
+        help="Request timeout in seconds. Defaults to 300 seconds.",
     )
     parser.add_argument(
         "--user-agent",
@@ -577,7 +579,7 @@ def http_request(
     try:
         connection.request(method, request_target(parsed), body=body, headers=headers)
         response = connection.getresponse()
-        response_body = response.read()
+        response_body = read_response_stream(response)
         location = response.getheader("Location")
     except (OSError, http.client.HTTPException) as exc:
         raise RuntimeError(f"Network request failed for {url}: {exc}") from exc
@@ -608,6 +610,16 @@ def http_request(
         )
 
     return response.status, response.reason, response_body
+
+
+def read_response_stream(response: http.client.HTTPResponse) -> bytes:
+    chunks = []
+    while True:
+        chunk = response.read(HTTP_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def retry_delay_from_body(response_body: bytes, fallback: int, maximum: int) -> int:

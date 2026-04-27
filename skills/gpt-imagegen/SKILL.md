@@ -83,6 +83,7 @@ The script defaults to:
 - Model: `gpt-image-2`
 - Size: `1024x1024`
 - Quality: `high`
+- Timeout: `300` seconds
 
 The image API supports native sizes such as `1024x1024`, `1024x1536`, `1536x1024`, and `auto`. For small final assets such as `100x100` avatars, use `--resize-output 100x100`; the script will generate at a supported native size and then locally resize the PNG output without third-party dependencies.
 
@@ -161,6 +162,7 @@ Common options:
 - `--base-url`: required HTTPS API base URL unless `GPT_IMAGE_BASE_URL` or the OS-specific config file provides it.
 - `--api-key`: required unless `GPT_IMAGE_API_KEY` or the OS-specific config file provides it.
 - `--user-agent`: optional browser-style User-Agent override. Defaults to a Chrome-like desktop User-Agent to avoid Cloudflare rejecting plain Python HTTP request signatures.
+- `--timeout`: request timeout in seconds, default `300`.
 - `--retries`: optional retry count for retryable API/network failures such as `429`, `500`, `502`, `503`, or `504`.
 - `--retry-delay`: fallback retry delay in seconds.
 - `--max-retry-delay`: cap for API-provided `retry_after` delays.
@@ -169,6 +171,7 @@ Common options:
 
 - When `--image` is omitted, the script calls `/v1/images/generations` with JSON.
 - When one or more `--image` values are provided, the script calls `/v1/images/edits` with multipart uploads. Multiple images are sent as repeated `image[]` form fields.
+- HTTPS responses are read in chunks to support large image responses without relying on a single full-response read.
 - Remote image and mask URLs must pass HTTPS and public-host safety validation before use. The configured API base URL must use HTTPS.
 - If the API returns a retryable gateway or rate-limit error, the script extracts concise error details and can retry when `--retries` is set.
 - OpenAI-compatible edit endpoints commonly accept PNG, WebP, or JPG inputs and may limit image count and file size. If the provider rejects an input, summarize the exact status code and message.
