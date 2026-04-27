@@ -1,0 +1,47 @@
+.DS_Store
+Thumbs.db
+
+# Editor and OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+config.local.*
+secrets.*
+
+# Python cache and environments
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+coverage/
+
+# Logs and generated scratch output
+*.log
+logs/
+tmp/
+temp/
+generated-image.*
+optimized-image.*
+composited-image.*
+metadata.json

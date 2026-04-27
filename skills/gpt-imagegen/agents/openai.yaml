@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT ImageGen"
+  short_description: "Default GPT image generation, editing, optimization, and composition skill."
+  default_prompt: "Generate or edit images with the configured gpt-image-2 API."
