@@ -84,6 +84,7 @@ The script defaults to:
 - Size: `1024x1024`
 - Quality: `high`
 - Timeout: `300` seconds
+- Transport: SSE streaming with `partial_images=2`
 
 The image API supports native sizes such as `1024x1024`, `1024x1536`, `1536x1024`, and `auto`. For small final assets such as `100x100` avatars, use `--resize-output 100x100`; the script will generate at a supported native size and then locally resize the PNG output without third-party dependencies.
 
@@ -116,15 +117,16 @@ Legacy `DCHA_IMAGE_*` environment variables and legacy config files are still ac
 
 ## Workflow
 
-1. Convert the user's image request into a clear image prompt. Preserve important style, subject, composition, aspect ratio, text, color, and mood details. If the user explicitly says to pass the prompt as-is, do not rewrite it.
+1. Convert the user's image request into a polished English image prompt. Preserve important style, subject, composition, aspect ratio, text, color, and mood details. If the user explicitly says to pass the prompt as-is, pass `--raw-prompt`.
 2. Check configuration. If `baseUrl` or `apiKey` is missing, ask the user for the correct values and wait before continuing.
 3. Choose an output path. Use the current workspace, a temporary/artifacts directory, or the user's requested path.
 4. For pure text-to-image, run `scripts/generate_image.py` with `--prompt` and `--output`.
 5. For editing, optimizing, restoring, or enhancing an existing image, pass the source file or URL with `--image`.
 6. For combining multiple images, repeat `--image` once per source image. Keep the user's composition intent in the prompt.
 7. For masked/localized edits, pass `--mask` with the mask image. The mask applies to the first `--image`.
-8. If the user requested a specific size, quality, output format, compression, background, moderation, or input fidelity setting, pass the matching option.
-9. Return the output path. If the host environment supports rendering local files, also display or attach the generated image.
+8. For satire, parody, public figures, living or deceased real people, fan art, branded characters, or copyright-sensitive concepts, keep the image fictional and add a small unobtrusive bottom caption or watermark: `Fictional dramatization`. The text must not cover faces, characters, products, or important visual content. The script applies this guidance automatically by default; use `--fictional-watermark always` or `--fictional-watermark never` when the user's intent makes that clearer.
+9. If the user requested a specific size, quality, output format, compression, background, moderation, input fidelity, streaming, or partial image setting, pass the matching option.
+10. Return the output path. If the host environment supports rendering local files, also display or attach the generated image.
 
 ## URL Safety
 
@@ -159,6 +161,10 @@ Common options:
 - `--moderation`: optional `auto` or `low`.
 - `--input-fidelity`: optional `low` or `high` for edit/composition requests where preserving input details matters. The script omits this field for the default `gpt-image-2` model because that model uses high input fidelity automatically.
 - `--model`: default `gpt-image-2`.
+- `--no-stream`: disable SSE streaming and request a normal JSON response. Streaming is enabled by default.
+- `--partial-images`: optional streamed partial image count from `0` to `3`, default `2`.
+- `--raw-prompt`: send the prompt exactly as provided, without English framing or safety caption guidance.
+- `--fictional-watermark`: optional `auto`, `always`, or `never`, default `auto`.
 - `--base-url`: required HTTPS API base URL unless `GPT_IMAGE_BASE_URL` or the OS-specific config file provides it.
 - `--api-key`: required unless `GPT_IMAGE_API_KEY` or the OS-specific config file provides it.
 - `--user-agent`: optional browser-style User-Agent override. Defaults to a Chrome-like desktop User-Agent to avoid Cloudflare rejecting plain Python HTTP request signatures.
@@ -169,9 +175,10 @@ Common options:
 
 ## Notes
 
-- When `--image` is omitted, the script calls `/v1/images/generations` with JSON.
-- When one or more `--image` values are provided, the script calls `/v1/images/edits` with multipart uploads. Multiple images are sent as repeated `image[]` form fields.
-- HTTPS responses are read in chunks to support large image responses without relying on a single full-response read.
+- When `--image` is omitted, the script calls `/v1/images/generations` with JSON and requests SSE streaming by default.
+- When one or more `--image` values are provided, the script calls `/v1/images/edits` with multipart uploads and requests SSE streaming by default. Multiple images are sent as repeated `image[]` form fields.
+- HTTPS responses are read in chunks, and streamed image events are parsed from `text/event-stream` responses.
+- The script no longer writes raw API metadata files. Return the generated image path and concise command output instead.
 - Remote image and mask URLs must pass HTTPS and public-host safety validation before use. The configured API base URL must use HTTPS.
 - If the API returns a retryable gateway or rate-limit error, the script extracts concise error details and can retry when `--retries` is set.
 - OpenAI-compatible edit endpoints commonly accept PNG, WebP, or JPG inputs and may limit image count and file size. If the provider rejects an input, summarize the exact status code and message.

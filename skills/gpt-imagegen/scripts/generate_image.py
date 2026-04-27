@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import codecs
 import http.client
 import ipaddress
 import json
@@ -29,6 +30,7 @@ RECOMMENDED_BASE_URL = "https://examine.com"
 DEFAULT_MODEL = "gpt-image-2"
 PLACEHOLDER_API_KEY = "YOUR_API_KEY"
 DEFAULT_TIMEOUT = 300
+DEFAULT_PARTIAL_IMAGES = 2
 HTTP_READ_CHUNK_SIZE = 1024 * 64
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -45,6 +47,45 @@ URL_PATTERN = re.compile(
 SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 SUPPORTED_API_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+FICTIONAL_WATERMARK_TEXT = "Fictional dramatization"
+FICTIONAL_WATERMARK_KEYWORDS = (
+    "satire",
+    "parody",
+    "spoof",
+    "mock",
+    "fictional",
+    "fan art",
+    "fanart",
+    "copyright",
+    "trademark",
+    "celebrity",
+    "politician",
+    "president",
+    "naruto",
+    "konoha",
+    "hokage",
+    "godzilla",
+    "trump",
+    "biden",
+    "musk",
+    "marvel",
+    "dc comics",
+    "disney",
+    "pokemon",
+    "火影",
+    "木叶",
+    "火影忍者",
+    "哥斯拉",
+    "特朗普",
+    "川普",
+    "恶搞",
+    "讽刺",
+    "同人",
+    "版权",
+    "真人",
+    "政客",
+    "总统",
+)
 
 
 class ParsedURL:
@@ -212,8 +253,30 @@ def parse_args() -> argparse.Namespace:
         help="HTTP User-Agent for the image API request.",
     )
     parser.add_argument(
-        "--metadata",
-        help="Optional path to write the raw API JSON response.",
+        "--no-stream",
+        dest="stream",
+        action="store_false",
+        help="Disable SSE streaming and request a normal JSON response.",
+    )
+    parser.set_defaults(stream=True)
+    parser.add_argument(
+        "--partial-images",
+        type=int,
+        choices=range(0, 4),
+        default=DEFAULT_PARTIAL_IMAGES,
+        metavar="0-3",
+        help="Number of streamed partial images to request. Defaults to 2.",
+    )
+    parser.add_argument(
+        "--raw-prompt",
+        action="store_true",
+        help="Send the prompt exactly as provided, without English framing or safety caption guidance.",
+    )
+    parser.add_argument(
+        "--fictional-watermark",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="Add a small bottom 'Fictional dramatization' caption for satire, public figures, or IP-inspired images. Defaults to auto.",
     )
     parser.add_argument(
         "--retries",
@@ -523,9 +586,10 @@ def request_headers(
     user_agent: str = DEFAULT_USER_AGENT,
     content_type: str | None = None,
     origin_url: str | None = None,
+    stream: bool = False,
 ) -> dict:
     headers = {
-        "Accept": "application/json",
+        "Accept": "text/event-stream" if stream else "application/json",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
@@ -622,6 +686,152 @@ def read_response_stream(response: http.client.HTTPResponse) -> bytes:
     return b"".join(chunks)
 
 
+class SSEParser:
+    def __init__(self) -> None:
+        self.decoder = codecs.getincrementaldecoder("utf-8")()
+        self.buffer = ""
+
+    def feed(self, chunk: bytes) -> list[dict]:
+        self.buffer += self.decoder.decode(chunk)
+        return self._pop_events()
+
+    def close(self) -> list[dict]:
+        self.buffer += self.decoder.decode(b"", final=True)
+        events = self._pop_events()
+        trailing = self.buffer.strip()
+        if trailing:
+            event = self._parse_event(trailing)
+            if event:
+                events.append(event)
+        self.buffer = ""
+        return events
+
+    def _pop_events(self) -> list[dict]:
+        normalized = self.buffer.replace("\r\n", "\n").replace("\r", "\n")
+        events = []
+        while "\n\n" in normalized:
+            raw_event, normalized = normalized.split("\n\n", 1)
+            event = self._parse_event(raw_event)
+            if event:
+                events.append(event)
+        self.buffer = normalized
+        return events
+
+    def _parse_event(self, raw_event: str) -> dict | None:
+        event_name = ""
+        data_lines = []
+        for line in raw_event.split("\n"):
+            if not line or line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if separator and value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                event_name = value
+            elif field == "data":
+                data_lines.append(value)
+
+        if not data_lines:
+            return None
+
+        data = "\n".join(data_lines)
+        if data.strip() == "[DONE]":
+            return {"type": "done"}
+
+        try:
+            parsed = json.loads(data)
+        except json.JSONDecodeError:
+            return {"type": event_name or "message", "data": data}
+
+        if isinstance(parsed, dict):
+            if event_name and "type" not in parsed:
+                parsed["type"] = event_name
+            return parsed
+        return {"type": event_name or "message", "data": parsed}
+
+
+def read_sse_stream(response: http.client.HTTPResponse) -> tuple[list[dict], bytes]:
+    parser = SSEParser()
+    events = []
+    raw_parts = []
+    while True:
+        chunk = response.read(HTTP_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        raw_parts.append(chunk)
+        events.extend(parser.feed(chunk))
+    events.extend(parser.close())
+    return events, b"".join(raw_parts)
+
+
+def http_request_sse(
+    method: str,
+    url: str,
+    headers: dict,
+    body: bytes | None,
+    timeout: int,
+    require_public_resolution: bool = True,
+    max_redirects: int = 5,
+) -> tuple[int, str, list[dict], bytes]:
+    parsed = validate_https_url(
+        url,
+        "Request",
+        require_public_resolution=require_public_resolution,
+    )
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise RuntimeError(f"Request URL has an invalid port: {url}") from exc
+
+    connection = http.client.HTTPSConnection(
+        parsed.hostname,
+        port=port,
+        timeout=timeout,
+        context=secure_ssl_context(),
+    )
+    try:
+        connection.request(method, request_target(parsed), body=body, headers=headers)
+        response = connection.getresponse()
+        location = response.getheader("Location")
+        if response.status in {301, 302, 303, 307, 308}:
+            response_body = read_response_stream(response)
+            events: list[dict] = []
+        elif response.status >= 400:
+            response_body = read_response_stream(response)
+            events = []
+        else:
+            events, response_body = read_sse_stream(response)
+    except (OSError, http.client.HTTPException) as exc:
+        raise RuntimeError(f"Network request failed for {url}: {exc}") from exc
+    finally:
+        connection.close()
+
+    if response.status in {301, 302, 303, 307, 308} and location:
+        if max_redirects <= 0:
+            raise RuntimeError("Too many HTTP redirects.")
+        if method != "GET" and response.status not in {307, 308}:
+            raise RuntimeError(
+                f"Refusing non-preserving redirect HTTP {response.status} for {method} request."
+            )
+        redirect_url = resolve_redirect_url(url, location)
+        validate_https_url(
+            redirect_url,
+            "Redirect",
+            require_public_resolution=require_public_resolution,
+        )
+        return http_request_sse(
+            method,
+            redirect_url,
+            headers,
+            body,
+            timeout,
+            require_public_resolution=require_public_resolution,
+            max_redirects=max_redirects - 1,
+        )
+
+    return response.status, response.reason, events, response_body
+
+
 def retry_delay_from_body(response_body: bytes, fallback: int, maximum: int) -> int:
     delay = fallback
     try:
@@ -712,6 +922,80 @@ def request_api_json(
     )
 
 
+def request_api_stream(
+    url: str,
+    headers: dict,
+    body: bytes,
+    timeout: int,
+    retries: int,
+    retry_delay: int,
+    max_retry_delay: int,
+) -> list[dict] | dict:
+    retryable_statuses = {429, 500, 502, 503, 504, 524}
+    attempts = max(0, retries) + 1
+    last_status = 0
+    last_body = b""
+    last_reason = ""
+
+    for attempt in range(attempts):
+        try:
+            status, reason, events, response_body = http_request_sse(
+                "POST",
+                url,
+                headers,
+                body,
+                timeout,
+                require_public_resolution=False,
+            )
+        except RuntimeError:
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(max(0, retry_delay))
+            continue
+
+        if status < 400:
+            if events:
+                stream_error = stream_error_from_events(events)
+                if stream_error:
+                    raise RuntimeError(f"API stream returned an error: {stream_error}")
+                return events
+            try:
+                return json.loads(response_body.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"API stream response did not include SSE events or valid JSON. "
+                    f"HTTP {status} {reason}."
+                ) from exc
+
+        last_status = status
+        last_body = response_body
+        last_reason = reason
+        if status not in retryable_statuses or attempt + 1 >= attempts:
+            break
+        time.sleep(retry_delay_from_body(response_body, retry_delay, max_retry_delay))
+
+    raise RuntimeError(
+        f"API stream request failed with HTTP {last_status}: "
+        f"{format_api_error(last_status, last_body) or last_reason}"
+    )
+
+
+def stream_error_from_events(events: list[dict]) -> str:
+    for event in events:
+        event_type = str(event.get("type") or event.get("event") or "").lower()
+        error = event.get("error")
+        if error or event_type == "error":
+            if isinstance(error, dict):
+                return str(error.get("message") or error.get("detail") or error)
+            if error:
+                return str(error)
+            message = event.get("message") or event.get("data")
+            if message:
+                return str(message)
+            return str(event)
+    return ""
+
+
 def request_json(
     url: str,
     payload: dict,
@@ -721,14 +1005,26 @@ def request_json(
     retries: int,
     retry_delay: int,
     max_retry_delay: int,
-) -> dict:
+    stream: bool,
+) -> dict | list[dict]:
     body = json.dumps(payload).encode("utf-8")
     headers = request_headers(
         api_key,
         user_agent,
         "application/json",
         origin_url=url,
+        stream=stream,
     )
+    if stream:
+        return request_api_stream(
+            url,
+            headers,
+            body,
+            timeout,
+            retries,
+            retry_delay,
+            max_retry_delay,
+        )
     return request_api_json(
         url,
         headers,
@@ -750,14 +1046,26 @@ def request_multipart(
     retries: int,
     retry_delay: int,
     max_retry_delay: int,
-) -> dict:
+    stream: bool,
+) -> dict | list[dict]:
     body, content_type = encode_multipart(fields, files)
     headers = request_headers(
         api_key,
         user_agent,
         content_type,
         origin_url=url,
+        stream=stream,
     )
+    if stream:
+        return request_api_stream(
+            url,
+            headers,
+            body,
+            timeout,
+            retries,
+            retry_delay,
+            max_retry_delay,
+        )
     return request_api_json(
         url,
         headers,
@@ -968,8 +1276,11 @@ def file_part_from_source(
 
 
 def image_bytes_from_response(
-    data: dict, timeout: int, user_agent: str = DEFAULT_USER_AGENT
+    data: dict | list[dict], timeout: int, user_agent: str = DEFAULT_USER_AGENT
 ) -> bytes:
+    if isinstance(data, list):
+        return image_bytes_from_stream_events(data, timeout, user_agent)
+
     items = data.get("data")
     if not isinstance(items, list) or not items:
         raise RuntimeError("API response did not include data[0].")
@@ -989,9 +1300,68 @@ def image_bytes_from_response(
     raise RuntimeError("API response did not include b64_json or url for the image.")
 
 
-def default_metadata_path(output: Path) -> Path:
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    return output.with_name(f"{output.stem}-{timestamp}.response.json")
+def image_bytes_from_stream_events(
+    events: list[dict], timeout: int, user_agent: str = DEFAULT_USER_AGENT
+) -> bytes:
+    last_b64 = ""
+    last_url = ""
+    for event in events:
+        b64_image = (
+            event.get("b64_json")
+            or event.get("image_base64")
+            or event.get("partial_image_b64")
+        )
+        if isinstance(b64_image, str) and b64_image:
+            last_b64 = b64_image
+        image_url = event.get("url")
+        if isinstance(image_url, str) and image_url:
+            last_url = image_url
+
+        nested_data = event.get("data")
+        if isinstance(nested_data, list):
+            for item in nested_data:
+                if not isinstance(item, dict):
+                    continue
+                nested_b64 = item.get("b64_json") or item.get("image_base64")
+                if isinstance(nested_b64, str) and nested_b64:
+                    last_b64 = nested_b64
+                nested_url = item.get("url")
+                if isinstance(nested_url, str) and nested_url:
+                    last_url = nested_url
+
+    if last_b64:
+        return base64.b64decode(last_b64)
+    if last_url:
+        return download_url(last_url, timeout, user_agent)
+    raise RuntimeError("API stream did not include b64_json or url for the image.")
+
+
+def prompt_needs_fictional_watermark(prompt: str, mode: str) -> bool:
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    normalized = prompt.lower()
+    return any(keyword in normalized for keyword in FICTIONAL_WATERMARK_KEYWORDS)
+
+
+def prepare_prompt(args: argparse.Namespace) -> str:
+    if args.raw_prompt:
+        return args.prompt
+
+    lines = [
+        "Create the image from this user request as a polished English visual prompt.",
+        "Preserve the user's intended subjects, composition, mood, aspect ratio, and visual style.",
+        "If the request is written in another language, translate and interpret it faithfully in English.",
+    ]
+    if prompt_needs_fictional_watermark(args.prompt, args.fictional_watermark):
+        lines.append(
+            f"Add a small, unobtrusive bottom caption or watermark reading "
+            f"'{FICTIONAL_WATERMARK_TEXT}'. Keep it outside the main action and do not "
+            "cover faces, products, characters, or important details."
+        )
+    lines.append(f"User request: {args.prompt}")
+    return "\n".join(lines)
 
 
 def image_payload_fields(args: argparse.Namespace) -> list[tuple[str, str]]:
@@ -1001,6 +1371,13 @@ def image_payload_fields(args: argparse.Namespace) -> list[tuple[str, str]]:
         ("size", args.size),
         ("quality", args.quality),
     ]
+    if args.stream:
+        fields.extend(
+            [
+                ("stream", "true"),
+                ("partial_images", str(args.partial_images)),
+            ]
+        )
     optional_values = {
         "output_format": args.output_format,
         "background": args.background,
@@ -1024,6 +1401,9 @@ def image_payload_json(args: argparse.Namespace) -> dict:
         "size": args.size,
         "quality": args.quality,
     }
+    if args.stream:
+        payload["stream"] = True
+        payload["partial_images"] = args.partial_images
     optional_values = {
         "output_format": args.output_format,
         "output_compression": args.output_compression,
@@ -1042,6 +1422,7 @@ def main() -> int:
     args.api_key = args.api_key.strip()
     args.size, args.resize_output = normalize_api_size(args.size, args.resize_output)
     validate_configuration(args.base_url, args.api_key)
+    args.prompt = prepare_prompt(args)
     if args.mask and not args.images:
         raise RuntimeError("--mask requires at least one --image input.")
 
@@ -1072,6 +1453,7 @@ def main() -> int:
             args.retries,
             args.retry_delay,
             args.max_retry_delay,
+            args.stream,
         )
         operation = "edit"
     else:
@@ -1086,6 +1468,7 @@ def main() -> int:
             args.retries,
             args.retry_delay,
             args.max_retry_delay,
+            args.stream,
         )
         operation = "generate"
 
@@ -1095,14 +1478,6 @@ def main() -> int:
     if args.resize_output:
         image_bytes = resize_png_bytes(image_bytes, args.resize_output)
     output.write_bytes(image_bytes)
-
-    if args.metadata:
-        metadata_path = Path(args.metadata).expanduser().resolve()
-        metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        metadata_path.write_text(
-            json.dumps(response_json, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
 
     guessed_type = mimetypes.guess_type(str(output))[0] or "image"
     print(
