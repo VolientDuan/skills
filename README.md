@@ -48,4 +48,4 @@ export GPT_IMAGE_API_KEY="YOUR_API_KEY"
 完整工作流和命令示例见 [`skills/gpt-imagegen/SKILL.md`](skills/gpt-imagegen/SKILL.md)。
 
 ## Share
-🌅 [2026-04-27] Special Share. Core contributor's share on Linux.do.
+🌅 [2026-04-27] Special Share. Core contributor's share on [Linux.do](https://linux.do/).
