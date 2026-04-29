@@ -128,9 +128,23 @@ Legacy `DCHA_IMAGE_*` environment variables and legacy config files are still ac
 7. For masked/localized edits, pass `--mask` with the mask image. The mask applies to the first `--image`.
 8. Watermark/caption policy: do not add a fictionalization caption by default for ordinary original images, fully self-designed characters, harmless fan-style scenes, product-free illustrations, or normal creative work. Add a small unobtrusive bottom caption or watermark such as `Fictional dramatization` only when it materially helps avoid confusion or misuse: fabricated news or documentary-like scenes, deceptive realism, satire or impersonation of public figures, living/deceased real people in sensitive or potentially misleading contexts, obvious brand/copyright-sensitive concepts where the output should be marked as unofficial, or user-requested parody/hoax-like material. The text must not cover faces, characters, products, or important visual content. Use `--fictional-watermark never` when the work is clearly original or the user explicitly does not want a caption; use `--fictional-watermark always` only for the higher-risk cases above.
 9. For multi-image deliverables, generate independent images in parallel when possible. Use a shared style bible, seed/reference image where available, fixed prompt fragments for characters and palette, consistent size/quality, and distinct output paths. Keep concurrency moderate (for example 2-4 workers) to avoid provider rate limits, and report any failed panels/images for retry.
-10. On retryable failures, retry with the same streaming mode first and keep the prompt/style/reference inputs stable. Do not switch to `--no-stream` as the first fallback; prefer streaming retries with `--retries`, a modest delay, or reduced concurrency. Only try non-streaming after repeated streaming failures or when specifically requested.
-11. If the user requested a specific size, quality, output format, compression, background, moderation, input fidelity, streaming, or partial image setting, pass the matching option.
-12. Return the output path. If the host environment supports rendering local files, also display or attach the generated image.
+10. On retryable transport failures, retry with the same streaming mode first and keep the prompt/style/reference inputs stable. Do not switch to `--no-stream` as the first fallback; prefer streaming retries with `--retries`, a modest delay, or reduced concurrency. Only try non-streaming after repeated streaming failures or when specifically requested.
+11. On content or moderation failures, revise the prompt once before giving up when the user's request can be made clearly allowed. Add concise context that clarifies lawful, non-deceptive intent instead of using vague or loaded wording. Do not invent facts, do not claim permissions the user did not provide, and do not use these notes to bypass disallowed content.
+12. If the user requested a specific size, quality, output format, compression, background, moderation, input fidelity, streaming, or partial image setting, pass the matching option.
+13. Return the output path. If the host environment supports rendering local files, also display or attach the generated image.
+
+## Prompt Clarification on Failures
+
+When a generation fails because the request was ambiguous or likely interpreted as unsafe, improve the prompt by adding accurate context and safer framing while preserving the user's creative goal:
+
+- Intimate or romantic scenes: specify consenting adults, non-explicit framing, normal affectionate behavior, tasteful portrait/fashion/editorial photography, natural body language, and no nudity or sexual acts unless the request is clearly allowed.
+- Youthful-looking or fan-art characters: avoid sexualization. If a mature styling is requested, describe the subject as an adult version or adult original character inspired by the style.
+- Realistic portraits or photography: clarify that the goal is a fictional, staged, editorial, fashion, cosplay, or personal portrait image, not documentary evidence or a misleading real event.
+- Brands, products, logos, and known franchises: clarify unofficial fan art, parody, tribute, concept design, or personal/non-commercial use when true. Avoid implying endorsement, official advertising, counterfeit packaging, or commercial use unless the user has provided that context.
+- Public figures or real people: keep the prompt non-deceptive and avoid sensitive, humiliating, sexual, or misleading depictions. Add fictionalization/watermark guidance when useful.
+- Violence, injury, or horror aesthetics: frame as stylized, cinematic, fantasy, stage makeup, prop design, game art, or fictional scene when accurate, and avoid gratuitous real-world harm.
+
+Prefer changing ambiguous words to precise visual language. For example, replace loaded terms with `romantic editorial portrait`, `tasteful adult couple pose`, `unofficial fan-art concept`, `fictional staged scene`, `cosplay-inspired fashion photo`, or `non-commercial tribute artwork` when those descriptions match the user's intent.
 
 ## Batch Generation
 
