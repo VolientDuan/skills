@@ -14,6 +14,7 @@ import mimetypes
 import os
 import posixpath
 import re
+import random
 import shlex
 import socket
 import ssl
@@ -31,6 +32,7 @@ DEFAULT_MODEL = "gpt-image-2"
 PLACEHOLDER_API_KEY = "YOUR_API_KEY"
 DEFAULT_TIMEOUT = 300
 DEFAULT_PARTIAL_IMAGES = 2
+DEFAULT_PARTIAL_IMAGES_MULTI = 0
 HTTP_READ_CHUNK_SIZE = 1024 * 64
 RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504, 524}
 STREAM_COMPLETED_EVENTS = {
@@ -80,45 +82,92 @@ URL_PATTERN = re.compile(
 )
 SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-SUPPORTED_API_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+LEGACY_SUPPORTED_API_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
 FICTIONAL_WATERMARK_TEXT = "Fictional dramatization"
-FICTIONAL_WATERMARK_KEYWORDS = (
+WATERMARK_PARODY_KEYWORDS = (
     "satire",
     "parody",
     "spoof",
     "mock",
-    "fictional",
-    "fan art",
-    "fanart",
-    "copyright",
-    "trademark",
+    "impersonat",
+    "hoax",
+    "prank",
+    "meme",
+    "恶搞",
+    "讽刺",
+    "冒充",
+    "整蛊",
+    "玩梗",
+)
+WATERMARK_MISLEADING_REALISM_KEYWORDS = (
+    "breaking news",
+    "news photo",
+    "press photo",
+    "paparazzi",
+    "surveillance",
+    "security camera",
+    "cctv",
+    "bodycam",
+    "police camera",
+    "documentary photo",
+    "evidence photo",
+    "leaked photo",
+    "新闻现场",
+    "突发新闻",
+    "记者拍摄",
+    "偷拍视频",
+    "监控画面",
+    "监控截图",
+    "执法记录",
+    "纪录片镜头",
+    "证据照片",
+    "泄露照片",
+)
+WATERMARK_SENSITIVE_SCENE_KEYWORDS = (
+    "arrest",
+    "crime scene",
+    "courtroom",
+    "protest",
+    "riot",
+    "war zone",
+    "disaster scene",
+    "hospital emergency",
+    "funeral",
+    "scandal",
+    "被捕",
+    "犯罪现场",
+    "法庭",
+    "示威",
+    "暴乱",
+    "战区",
+    "灾难现场",
+    "急诊",
+    "葬礼",
+    "丑闻",
+)
+WATERMARK_REAL_PERSON_KEYWORDS = (
     "celebrity",
     "politician",
     "president",
-    "naruto",
-    "konoha",
-    "hokage",
-    "godzilla",
+    "prime minister",
+    "public figure",
+    "real person",
+    "elon musk",
     "trump",
     "biden",
-    "musk",
-    "marvel",
-    "dc comics",
-    "disney",
-    "pokemon",
-    "火影",
-    "木叶",
-    "火影忍者",
-    "哥斯拉",
+    "taylor swift",
+    "习近平",
+    "普京",
+    "马斯克",
     "特朗普",
     "川普",
-    "恶搞",
-    "讽刺",
-    "同人",
-    "版权",
-    "真人",
+    "拜登",
+    "明星",
+    "名人",
     "政客",
     "总统",
+    "公众人物",
+    "真人",
 )
 
 
@@ -142,6 +191,10 @@ class ParsedURL:
         self.query = query
         self.username = username
         self.password = password
+
+
+def is_gpt_image_2_model(model: str) -> bool:
+    return model.strip().lower() == "gpt-image-2"
 
 
 def default_config_path(app_name: str) -> Path:
@@ -222,6 +275,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--size", default="1024x1024", help="Image size.")
     parser.add_argument(
+        "--count",
+        type=int,
+        default=1,
+        help=(
+            "Number of final images to request in one API call when the provider "
+            "supports it. Defaults to 1."
+        ),
+    )
+    parser.add_argument(
         "--resize-output",
         help=(
             "Optional final PNG resize such as 100x100. Use this when the API "
@@ -299,7 +361,10 @@ def parse_args() -> argparse.Namespace:
         choices=range(0, 4),
         default=DEFAULT_PARTIAL_IMAGES,
         metavar="0-3",
-        help="Number of streamed partial images to request. Defaults to 2.",
+        help=(
+            "Number of streamed partial images to request. Defaults to 2 for "
+            "single-image requests and is auto-reduced for multi-image requests."
+        ),
     )
     parser.add_argument(
         "--raw-prompt",
@@ -391,14 +456,25 @@ def parse_dimensions(value: str, label: str = "size") -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
-def normalize_api_size(size: str, resize_output: str | None = None) -> tuple[str, str | None]:
+def normalize_api_size(
+    size: str,
+    resize_output: str | None = None,
+    model: str = DEFAULT_MODEL,
+) -> tuple[str, str | None]:
     normalized = size.strip().lower()
-    if normalized in SUPPORTED_API_SIZES:
+    if is_gpt_image_2_model(model):
+        if normalized == "auto":
+            return normalized, resize_output
+        parse_dimensions(normalized, "size")
+        return normalized, resize_output
+
+    supported_sizes = LEGACY_SUPPORTED_API_SIZES
+    if normalized in supported_sizes:
         return normalized, resize_output
     parse_dimensions(normalized, "size")
     if resize_output:
         raise RuntimeError(
-            f"API size {size!r} is not one of {sorted(SUPPORTED_API_SIZES)}. "
+            f"API size {size!r} is not one of {sorted(supported_sizes)}. "
             "Use a supported --size and put the final dimensions in --resize-output."
         )
     return "1024x1024", normalized
@@ -888,6 +964,13 @@ def retry_delay_from_body(response_body: bytes, fallback: int, maximum: int) -> 
     return max(0, min(delay, maximum))
 
 
+def jittered_delay(delay: int) -> float:
+    if delay <= 0:
+        return 0.0
+    jitter = min(1.0, delay * 0.25)
+    return max(0.0, delay + random.uniform(0.0, jitter))
+
+
 def format_api_error(status: int, response_body: bytes) -> str:
     details = response_body.decode("utf-8", errors="replace")
     try:
@@ -940,7 +1023,7 @@ def request_api_json(
         except RuntimeError:
             if attempt + 1 >= attempts:
                 raise
-            time.sleep(max(0, retry_delay))
+            time.sleep(jittered_delay(max(0, retry_delay)))
             continue
 
         if result.status < 400:
@@ -956,7 +1039,11 @@ def request_api_json(
         last_reason = result.reason
         if result.status not in RETRYABLE_HTTP_STATUSES or attempt + 1 >= attempts:
             break
-        time.sleep(retry_delay_from_body(result.body, retry_delay, max_retry_delay))
+        time.sleep(
+            jittered_delay(
+                retry_delay_from_body(result.body, retry_delay, max_retry_delay)
+            )
+        )
 
     raise RuntimeError(
         f"API request failed with HTTP {last_status}: "
@@ -991,7 +1078,7 @@ def request_api_stream(
         except RuntimeError:
             if attempt + 1 >= attempts:
                 raise
-            time.sleep(max(0, retry_delay))
+            time.sleep(jittered_delay(max(0, retry_delay)))
             continue
 
         if result.status < 400:
@@ -1021,7 +1108,11 @@ def request_api_stream(
         last_reason = result.reason
         if result.status not in RETRYABLE_HTTP_STATUSES or attempt + 1 >= attempts:
             break
-        time.sleep(retry_delay_from_body(result.body, retry_delay, max_retry_delay))
+        time.sleep(
+            jittered_delay(
+                retry_delay_from_body(result.body, retry_delay, max_retry_delay)
+            )
+        )
 
     raise RuntimeError(
         f"API stream request failed with HTTP {last_status}: "
@@ -1341,18 +1432,26 @@ def file_part_from_source(
 def image_bytes_from_response(
     data: dict | list[dict], timeout: int, user_agent: str = DEFAULT_USER_AGENT
 ) -> bytes:
+    results = image_results_from_response(data, timeout, user_agent)
+    return results[0]
+
+
+def image_results_from_response(
+    data: dict | list[dict], timeout: int, user_agent: str = DEFAULT_USER_AGENT
+) -> list[bytes]:
     if isinstance(data, list):
-        return image_bytes_from_stream_events(data, timeout, user_agent)
+        return image_results_from_stream_events(data, timeout, user_agent)
 
     items = data.get("data")
     if not isinstance(items, list) or not items:
         raise RuntimeError("API response did not include data[0].")
 
-    first = items[0]
-    if not isinstance(first, dict):
-        raise RuntimeError("API response data[0] is not an object.")
-
-    return image_bytes_from_image_object(first, timeout, user_agent)
+    results = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise RuntimeError("API response data item is not an object.")
+        results.append(image_bytes_from_image_object(item, timeout, user_agent))
+    return results
 
 
 def image_bytes_from_image_object(
@@ -1372,6 +1471,13 @@ def image_bytes_from_image_object(
 def image_bytes_from_stream_events(
     events: list[dict], timeout: int, user_agent: str = DEFAULT_USER_AGENT
 ) -> bytes:
+    results = image_results_from_stream_events(events, timeout, user_agent)
+    return results[0]
+
+
+def image_results_from_stream_events(
+    events: list[dict], timeout: int, user_agent: str = DEFAULT_USER_AGENT
+) -> list[bytes]:
     completed_items = []
     partial_count = 0
     for event in events:
@@ -1389,7 +1495,10 @@ def image_bytes_from_stream_events(
             completed_items.extend(item for item in nested_data if isinstance(item, dict))
 
     if completed_items:
-        return image_bytes_from_image_object(completed_items[-1], timeout, user_agent)
+        return [
+            image_bytes_from_image_object(item, timeout, user_agent)
+            for item in completed_items
+        ]
 
     raise RuntimeError(
         "API stream did not include a completed image event with b64_json or url. "
@@ -1403,7 +1512,22 @@ def prompt_needs_fictional_watermark(prompt: str, mode: str) -> bool:
     if mode == "never":
         return False
     normalized = prompt.lower()
-    return any(keyword in normalized for keyword in FICTIONAL_WATERMARK_KEYWORDS)
+    has_real_person = any(
+        keyword in normalized for keyword in WATERMARK_REAL_PERSON_KEYWORDS
+    )
+    has_parody = any(keyword in normalized for keyword in WATERMARK_PARODY_KEYWORDS)
+    has_misleading_realism = any(
+        keyword in normalized for keyword in WATERMARK_MISLEADING_REALISM_KEYWORDS
+    )
+    has_sensitive_scene = any(
+        keyword in normalized for keyword in WATERMARK_SENSITIVE_SCENE_KEYWORDS
+    )
+
+    if has_parody:
+        return True
+    if has_real_person and (has_misleading_realism or has_sensitive_scene):
+        return True
+    return False
 
 
 def prepare_prompt(args: argparse.Namespace) -> str:
@@ -1425,6 +1549,14 @@ def prepare_prompt(args: argparse.Namespace) -> str:
     return "\n".join(lines)
 
 
+def resolve_partial_images(count: int, requested_partial_images: int, stream: bool) -> int | None:
+    if not stream:
+        return None
+    if count <= 1:
+        return requested_partial_images
+    return min(DEFAULT_PARTIAL_IMAGES_MULTI, requested_partial_images)
+
+
 def image_payload_fields(args: argparse.Namespace) -> list[tuple[str, str]]:
     fields = [
         ("model", args.model),
@@ -1432,13 +1564,19 @@ def image_payload_fields(args: argparse.Namespace) -> list[tuple[str, str]]:
         ("size", args.size),
         ("quality", args.quality),
     ]
+    if args.count > 1:
+        fields.append(("n", str(args.count)))
     if args.stream:
+        partial_images = resolve_partial_images(
+            args.count, args.partial_images, args.stream
+        )
         fields.extend(
             [
                 ("stream", "true"),
-                ("partial_images", str(args.partial_images)),
             ]
         )
+        if partial_images is not None:
+            fields.append(("partial_images", str(partial_images)))
     optional_values = {
         "output_format": args.output_format,
         "background": args.background,
@@ -1462,9 +1600,15 @@ def image_payload_json(args: argparse.Namespace) -> dict:
         "size": args.size,
         "quality": args.quality,
     }
+    if args.count > 1:
+        payload["n"] = args.count
     if args.stream:
+        partial_images = resolve_partial_images(
+            args.count, args.partial_images, args.stream
+        )
         payload["stream"] = True
-        payload["partial_images"] = args.partial_images
+        if partial_images is not None:
+            payload["partial_images"] = partial_images
     optional_values = {
         "output_format": args.output_format,
         "output_compression": args.output_compression,
@@ -1477,11 +1621,27 @@ def image_payload_json(args: argparse.Namespace) -> dict:
     return payload
 
 
+def output_path_for_index(output: Path, index: int, total: int) -> Path:
+    if total <= 1:
+        return output
+    suffix = output.suffix
+    stem = output.stem if suffix else output.name
+    parent = output.parent
+    numbered = f"{stem}_{index + 1:02d}{suffix}"
+    return parent / numbered
+
+
 def main() -> int:
     args = parse_args()
     args.base_url = args.base_url.strip()
     args.api_key = args.api_key.strip()
-    args.size, args.resize_output = normalize_api_size(args.size, args.resize_output)
+    if args.count < 1:
+        raise RuntimeError("--count must be at least 1.")
+    args.size, args.resize_output = normalize_api_size(
+        args.size,
+        args.resize_output,
+        args.model,
+    )
     validate_configuration(args.base_url, args.api_key)
     args.prompt = prepare_prompt(args)
     if args.mask and not args.images:
@@ -1533,22 +1693,34 @@ def main() -> int:
         )
         operation = "generate"
 
-    image_bytes = image_bytes_from_response(
+    image_results = image_results_from_response(
         response_json, args.timeout, args.user_agent
     )
-    if args.resize_output:
-        image_bytes = resize_png_bytes(image_bytes, args.resize_output)
-    output.write_bytes(image_bytes)
+    saved_outputs = []
+    for index, image_bytes in enumerate(image_results):
+        if args.resize_output:
+            image_bytes = resize_png_bytes(image_bytes, args.resize_output)
+        current_output = output_path_for_index(output, index, len(image_results))
+        current_output.write_bytes(image_bytes)
+        saved_outputs.append(str(current_output))
 
     guessed_type = mimetypes.guess_type(str(output))[0] or "image"
     print(
         json.dumps(
             {
                 "operation": operation,
-                "output": str(output),
+                "output": saved_outputs[0],
+                "outputs": saved_outputs,
+                "requested_count": args.count,
+                "returned_count": len(saved_outputs),
                 "content_type": guessed_type,
                 "api_size": args.size,
                 "resize_output": args.resize_output,
+                "partial_images": resolve_partial_images(
+                    args.count,
+                    args.partial_images,
+                    args.stream,
+                ),
             },
             indent=2,
         )

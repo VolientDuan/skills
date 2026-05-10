@@ -59,6 +59,15 @@ python3 scripts/generate_image.py \
   --output ./generated-image.png
 ```
 
+Generate multiple images in one request:
+
+```bash
+python3 scripts/generate_image.py \
+  --prompt "Four premium packaging concepts for a jasmine tea brand, same art direction, different front label layouts" \
+  --count 4 \
+  --output ./tea-variant.png
+```
+
 To edit or optimize an existing image, pass one `--image`:
 
 ```bash
@@ -88,7 +97,7 @@ The script defaults to:
 
 Prefer the default SSE streaming transport for both first attempts and retries. In current provider behavior, streaming is usually more reliable than `--no-stream`; only use `--no-stream` when the user explicitly asks for it or streaming repeatedly fails for the same request.
 
-The image API supports native sizes such as `1024x1024`, `1024x1536`, `1536x1024`, and `auto`. For small final assets such as `100x100` avatars, use `--resize-output 100x100`; the script will generate at a supported native size and then locally resize the PNG output without third-party dependencies.
+For `gpt-image-2`, the script accepts arbitrary `WIDTHxHEIGHT` sizes supported by the provider, plus `auto`. For legacy OpenAI-compatible image models, it keeps the conservative native-size fallback behavior around `1024x1024`, `1024x1536`, `1536x1024`, and `auto`. For small final assets such as `100x100` avatars, use `--resize-output 100x100`; the script will generate at a supported native size and then locally resize the PNG output without third-party dependencies.
 
 ## Configuration Gate
 
@@ -126,12 +135,13 @@ Legacy `DCHA_IMAGE_*` environment variables and legacy config files are still ac
 5. For editing, optimizing, restoring, or enhancing an existing image, pass the source file or URL with `--image`.
 6. For combining multiple images, repeat `--image` once per source image. Keep the user's composition intent in the prompt.
 7. For masked/localized edits, pass `--mask` with the mask image. The mask applies to the first `--image`.
-8. Watermark/caption policy: do not add a fictionalization caption by default for ordinary original images, fully self-designed characters, harmless fan-style scenes, product-free illustrations, or normal creative work. Add a small unobtrusive bottom caption or watermark such as `Fictional dramatization` only when it materially helps avoid confusion or misuse: fabricated news or documentary-like scenes, deceptive realism, satire or impersonation of public figures, living/deceased real people in sensitive or potentially misleading contexts, obvious brand/copyright-sensitive concepts where the output should be marked as unofficial, or user-requested parody/hoax-like material. The text must not cover faces, characters, products, or important visual content. Use `--fictional-watermark never` when the work is clearly original or the user explicitly does not want a caption; use `--fictional-watermark always` only for the higher-risk cases above.
-9. For multi-image deliverables, generate independent images in parallel when possible. Use a shared style bible, seed/reference image where available, fixed prompt fragments for characters and palette, consistent size/quality, and distinct output paths. Keep concurrency moderate (for example 2-4 workers) to avoid provider rate limits, and report any failed panels/images for retry.
-10. On retryable transport failures, retry with the same streaming mode first and keep the prompt/style/reference inputs stable. Do not switch to `--no-stream` as the first fallback; prefer streaming retries with `--retries`, a modest delay, or reduced concurrency. Only try non-streaming after repeated streaming failures or when specifically requested.
-11. On content or moderation failures, revise the prompt once before giving up when the user's request can be made clearly allowed. Add concise context that clarifies lawful, non-deceptive intent instead of using vague or loaded wording. Do not invent facts, do not claim permissions the user did not provide, and do not use these notes to bypass disallowed content.
-12. If the user requested a specific size, quality, output format, compression, background, moderation, input fidelity, streaming, or partial image setting, pass the matching option.
-13. Return the output path. If the host environment supports rendering local files, also display or attach the generated image.
+8. Watermark/caption policy: default to no fictionalization watermark for normal image generation. Ordinary original images, regular illustrations, product shots, landscapes, concept art, portraits of fictional characters, and harmless fan-style scenes should not get a caption by default. Add a small unobtrusive caption such as `Fictional dramatization` only when it materially helps avoid confusion or misuse: parody/hoax/impersonation requests, fake news or documentary-style realism, or depictions of real people/public figures in sensitive or misleading contexts. The text must not cover faces, characters, products, or important visual content. Use `--fictional-watermark never` for clearly normal/non-deceptive work; reserve `--fictional-watermark always` for the higher-risk cases above.
+9. For a small batch of closely related variants, prefer a single API call with `--count` so the provider returns multiple finals together. This reduces repeated prompt overhead and usually improves throughput for "give me 2-4 options" style requests.
+10. For larger deliverables such as storyboards, comics, or 6+ independent panels, split them into multiple requests and parallelize at the process level when possible. Use a shared style bible, seed/reference image where available, fixed prompt fragments for characters and palette, consistent size/quality, and distinct output paths. Keep concurrency moderate (for example 2-4 workers) to avoid provider rate limits, and report any failed panels/images for retry.
+11. On retryable transport failures, retry with the same streaming mode first and keep the prompt/style/reference inputs stable. Do not switch to `--no-stream` as the first fallback; prefer streaming retries with `--retries`, a modest delay, jittered backoff, or reduced concurrency. Only try non-streaming after repeated streaming failures or when specifically requested.
+12. On content or moderation failures, revise the prompt once before giving up when the user's request can be made clearly allowed. Add concise context that clarifies lawful, non-deceptive intent instead of using vague or loaded wording. Do not invent facts, do not claim permissions the user did not provide, and do not use these notes to bypass disallowed content.
+13. If the user requested a specific size, quality, output format, compression, background, moderation, input fidelity, streaming, partial image setting, or image count, pass the matching option.
+14. Return the output path. For `--count > 1`, return the full output list. If the host environment supports rendering local files, also display or attach the generated image.
 
 ## Prompt Clarification on Failures
 
@@ -141,19 +151,23 @@ When a generation fails because the request was ambiguous or likely interpreted 
 - Youthful-looking or fan-art characters: avoid sexualization. If a mature styling is requested, describe the subject as an adult version or adult original character inspired by the style.
 - Realistic portraits or photography: clarify that the goal is a fictional, staged, editorial, fashion, cosplay, or personal portrait image, not documentary evidence or a misleading real event.
 - Brands, products, logos, and known franchises: clarify unofficial fan art, parody, tribute, concept design, or personal/non-commercial use when true. Avoid implying endorsement, official advertising, counterfeit packaging, or commercial use unless the user has provided that context.
-- Public figures or real people: keep the prompt non-deceptive and avoid sensitive, humiliating, sexual, or misleading depictions. Add fictionalization/watermark guidance when useful.
+- Public figures or real people: keep the prompt non-deceptive and avoid sensitive, humiliating, sexual, or misleading depictions. Only add fictionalization/watermark guidance when the request is parody-like, impersonation-like, documentary-news-like, or otherwise likely to be misread as real evidence.
 - Violence, injury, or horror aesthetics: frame as stylized, cinematic, fantasy, stage makeup, prop design, game art, or fictional scene when accurate, and avoid gratuitous real-world harm.
 
 Prefer changing ambiguous words to precise visual language. For example, replace loaded terms with `romantic editorial portrait`, `tasteful adult couple pose`, `unofficial fan-art concept`, `fictional staged scene`, `cosplay-inspired fashion photo`, or `non-commercial tribute artwork` when those descriptions match the user's intent.
 
 ## Batch Generation
 
-For requests such as "make 10 images", "generate a storyboard", or "produce variants", parallelize independent outputs instead of running a long serial queue when the API and rate limits allow it.
+For requests such as "make 10 images", "generate a storyboard", or "produce variants", choose between native multi-image output and parallel requests based on the job shape:
+
+- Use `--count 2`, `--count 3`, or `--count 4` when the user wants a small set of tightly related variants from the same prompt and art direction.
+- Use multiple independent requests for larger sets, scene-by-scene storyboards, or jobs where each panel needs a materially different prompt.
 
 - Keep consistency by writing one reusable English style bible and reusing it in every prompt.
 - If the first generated image establishes the desired character/style, use it as a reference input for later panels when consistency matters.
-- Use stable filenames (`panel_01_...png`, `variant_01.png`) and save into a dedicated output directory.
-- Prefer 2-4 parallel workers. If rate limits, gateway errors, or incomplete streams appear, lower concurrency and retry failed items with streaming still enabled.
+- Use stable filenames (`panel_01_...png`, `variant_01.png`) and save into a dedicated output directory. When `--count > 1`, the script auto-saves numbered outputs like `variant_01.png`, `variant_02.png`.
+- Prefer 2-4 parallel workers for multi-request jobs. If rate limits, gateway errors, or incomplete streams appear, lower concurrency and retry failed items with streaming still enabled.
+- For `--count > 1`, keep `partial_images` low. The script auto-reduces streamed previews to avoid extra event overhead on batched responses.
 - For storyboards/comics, track the scene order in filenames even if images complete out of order.
 
 ## URL Safety
@@ -181,6 +195,7 @@ Common options:
 - `--mask`: optional mask image path or HTTPS URL for localized edits.
 - `--output`: output image path; parent directories are created automatically.
 - `--size`: image size such as `1024x1024`, `1024x1536`, or `1536x1024`.
+- `--count`: request multiple final images in one API call. For `--count > 1`, the script auto-saves numbered files.
 - `--resize-output`: optional final PNG resize such as `100x100` for small assets. If `--size` is not natively supported, the script uses `1024x1024` and treats the requested size as `--resize-output`.
 - `--quality`: generation quality, default `high`.
 - `--output-format`: optional `png`, `jpeg`, or `webp`.
@@ -190,9 +205,9 @@ Common options:
 - `--input-fidelity`: optional `low` or `high` for edit/composition requests where preserving input details matters. The script omits this field for the default `gpt-image-2` model because that model uses high input fidelity automatically.
 - `--model`: default `gpt-image-2`.
 - `--no-stream`: disable SSE streaming and request a normal JSON response. Streaming is enabled by default and should remain the preferred retry mode unless streaming repeatedly fails.
-- `--partial-images`: optional streamed partial image count from `0` to `3`, default `2`.
+- `--partial-images`: optional streamed partial image count from `0` to `3`, default `2` for single-image requests. The script auto-reduces this for multi-image requests to improve efficiency.
 - `--raw-prompt`: send the prompt exactly as provided, without English framing or safety caption guidance.
-- `--fictional-watermark`: optional `auto`, `always`, or `never`, default `auto`. Use `never` for clearly original/non-deceptive work when no caption is needed; reserve `always` for high-risk fictionalization or parody/impersonation contexts.
+- `--fictional-watermark`: optional `auto`, `always`, or `never`, default `auto`. In `auto`, the skill should stay conservative and avoid captions for normal generations; use `always` mainly for parody, impersonation, fake-news/documentary-style, or similarly high-risk fictionalization contexts.
 - `--base-url`: required HTTPS API base URL unless `GPT_IMAGE_BASE_URL` or the OS-specific config file provides it.
 - `--api-key`: required unless `GPT_IMAGE_API_KEY` or the OS-specific config file provides it.
 - `--user-agent`: optional browser-style User-Agent override. Defaults to a Chrome-like desktop User-Agent to avoid Cloudflare rejecting plain Python HTTP request signatures.
@@ -205,11 +220,12 @@ Common options:
 
 - When `--image` is omitted, the script calls `/v1/images/generations` with JSON and requests SSE streaming by default.
 - When one or more `--image` values are provided, the script calls `/v1/images/edits` with multipart uploads and requests SSE streaming by default. Multiple uploaded images are sent as repeated `image[]` form fields, matching the official multipart examples.
+- When `--count > 1`, the script passes `n` to the API and saves every returned final image instead of only the first one.
 - HTTPS responses are read in chunks, and streamed image events are parsed from `text/event-stream` responses.
 - Streaming follows the official Images API event shape: `image_generation.partial_image` and `image_edit.partial_image` are treated only as progress events, while `image_generation.completed` and `image_edit.completed` are required for the final saved image. If the stream disconnects after a completed event, the script can still save that final image; if it disconnects with only partial events, the script reports a clear incomplete-stream error.
 - The script no longer writes raw API metadata files. Return the generated image path and concise command output instead.
 - Remote image and mask URLs must pass HTTPS and public-host safety validation before use. The configured API base URL must use HTTPS.
-- If the API returns a retryable gateway, rate-limit, timeout, or incomplete-stream error, the script extracts concise error details and can retry when `--retries` is set. Prefer another streaming retry before changing transport.
+- If the API returns a retryable gateway, rate-limit, timeout, or incomplete-stream error, the script extracts concise error details and can retry when `--retries` is set. Retries use a small jitter on top of the base delay to reduce collision under concurrent runs. Prefer another streaming retry before changing transport.
 - OpenAI-compatible edit endpoints commonly accept PNG, WebP, or JPG inputs and may limit image count and file size. If the provider rejects an input, summarize the exact status code and message.
 - The bundled script does not embed fallback API credentials. It honors `GPT_IMAGE_BASE_URL`, `GPT_IMAGE_API_KEY`, and the OS-specific config file.
 - Do not print the configured API key in user-facing responses.
