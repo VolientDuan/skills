@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate or edit images with gpt-image-2 through an OpenAI-compatible API."""
+"""Generate or edit images through an OpenAI-compatible API."""
 
 from __future__ import annotations
 
@@ -83,6 +83,8 @@ URL_PATTERN = re.compile(
 SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 LEGACY_SUPPORTED_API_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+OFFICIAL_GUIDE_IMAGE_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+OFFICIAL_GPT_IMAGE_QUALITIES = {"auto", "low", "medium", "high"}
 FICTIONAL_WATERMARK_TEXT = "Fictional dramatization"
 WATERMARK_PARODY_KEYWORDS = (
     "satire",
@@ -290,7 +292,12 @@ def parse_args() -> argparse.Namespace:
             "does not natively support the requested output dimensions."
         ),
     )
-    parser.add_argument("--quality", default="high", help="Image quality.")
+    parser.add_argument(
+        "--quality",
+        choices=tuple(sorted(OFFICIAL_GPT_IMAGE_QUALITIES)),
+        default="high",
+        help="Image quality.",
+    )
     parser.add_argument(
         "--output-format",
         choices=("png", "jpeg", "webp"),
@@ -348,22 +355,29 @@ def parse_args() -> argparse.Namespace:
         or DEFAULT_USER_AGENT,
         help="HTTP User-Agent for the image API request.",
     )
-    parser.add_argument(
+    stream_group = parser.add_mutually_exclusive_group()
+    stream_group.add_argument(
+        "--stream",
+        dest="stream",
+        action="store_true",
+        help="Enable SSE streaming when the selected model officially supports it.",
+    )
+    stream_group.add_argument(
         "--no-stream",
         dest="stream",
         action="store_false",
         help="Disable SSE streaming and request a normal JSON response.",
     )
-    parser.set_defaults(stream=True)
+    parser.set_defaults(stream=False)
     parser.add_argument(
         "--partial-images",
         type=int,
         choices=range(0, 4),
-        default=DEFAULT_PARTIAL_IMAGES,
+        default=None,
         metavar="0-3",
         help=(
-            "Number of streamed partial images to request. Defaults to 2 for "
-            "single-image requests and is auto-reduced for multi-image requests."
+            "Number of streamed partial images to request. Only valid together with "
+            "--stream."
         ),
     )
     parser.add_argument(
@@ -463,10 +477,14 @@ def normalize_api_size(
 ) -> tuple[str, str | None]:
     normalized = size.strip().lower()
     if is_gpt_image_2_model(model):
-        if normalized == "auto":
+        if normalized in OFFICIAL_GUIDE_IMAGE_SIZES:
             return normalized, resize_output
         parse_dimensions(normalized, "size")
-        return normalized, resize_output
+        raise RuntimeError(
+            f"gpt-image-2 size {size!r} is outside the official image generation guide "
+            f"set {sorted(OFFICIAL_GUIDE_IMAGE_SIZES)}. Use one of those values for "
+            "--size and put the desired final dimensions in --resize-output."
+        )
 
     supported_sizes = LEGACY_SUPPORTED_API_SIZES
     if normalized in supported_sizes:
@@ -1549,12 +1567,61 @@ def prepare_prompt(args: argparse.Namespace) -> str:
     return "\n".join(lines)
 
 
-def resolve_partial_images(count: int, requested_partial_images: int, stream: bool) -> int | None:
+def resolve_partial_images(
+    count: int, requested_partial_images: int | None, stream: bool
+) -> int | None:
     if not stream:
         return None
+    if requested_partial_images is None:
+        requested_partial_images = DEFAULT_PARTIAL_IMAGES
     if count <= 1:
         return requested_partial_images
     return min(DEFAULT_PARTIAL_IMAGES_MULTI, requested_partial_images)
+
+
+def validate_official_request_constraints(args: argparse.Namespace) -> None:
+    if args.count > 10:
+        raise RuntimeError(
+            "--count must be between 1 and 10 according to the official Images API."
+        )
+
+    if args.input_fidelity is not None and is_gpt_image_2_model(args.model):
+        raise RuntimeError(
+            "--input-fidelity is blocked for gpt-image-2 because the official image "
+            "generation guide says gpt-image-2 automatically uses high input fidelity "
+            "for edits and compositions, so the request should omit this field."
+        )
+
+    if args.partial_images is not None and not args.stream:
+        raise RuntimeError("--partial-images requires --stream.")
+
+    if args.output_compression is not None and args.output_format not in {"jpeg", "webp"}:
+        raise RuntimeError(
+            "--output-compression is only valid together with --output-format jpeg or webp."
+        )
+
+    if args.background == "transparent" and is_gpt_image_2_model(args.model):
+        raise RuntimeError(
+            "--background transparent is blocked for gpt-image-2 because the official "
+            "image generation guide says transparent backgrounds are not currently "
+            "supported by gpt-image-2."
+        )
+
+    if args.background == "transparent" and args.output_format == "jpeg":
+        raise RuntimeError(
+            "--background transparent is only supported with png or webp output."
+        )
+
+    if args.resize_output and args.output_format not in {None, "png"}:
+        raise RuntimeError(
+            "--resize-output currently supports PNG responses only. Use --output-format png "
+            "or omit --output-format."
+        )
+
+    if args.images and len(args.images) > 16:
+        raise RuntimeError(
+            "The official Images API allows up to 16 input images for GPT image edit requests."
+        )
 
 
 def image_payload_fields(args: argparse.Namespace) -> list[tuple[str, str]]:
@@ -1582,7 +1649,7 @@ def image_payload_fields(args: argparse.Namespace) -> list[tuple[str, str]]:
         "background": args.background,
         "moderation": args.moderation,
     }
-    if args.input_fidelity and args.model != "gpt-image-2":
+    if args.input_fidelity is not None:
         optional_values["input_fidelity"] = args.input_fidelity
     if args.output_compression is not None:
         optional_values["output_compression"] = str(args.output_compression)
@@ -1615,6 +1682,8 @@ def image_payload_json(args: argparse.Namespace) -> dict:
         "background": args.background,
         "moderation": args.moderation,
     }
+    if args.input_fidelity is not None:
+        optional_values["input_fidelity"] = args.input_fidelity
     for key, value in optional_values.items():
         if value is not None:
             payload[key] = value
@@ -1637,6 +1706,7 @@ def main() -> int:
     args.api_key = args.api_key.strip()
     if args.count < 1:
         raise RuntimeError("--count must be at least 1.")
+    validate_official_request_constraints(args)
     args.size, args.resize_output = normalize_api_size(
         args.size,
         args.resize_output,
