@@ -18,7 +18,7 @@ All skills live under the repository-level `skills/` directory. Each skill uses 
 
 ## Included Skills
 
-- [`gpt-imagegen`](skills/gpt-imagegen/) - Image generation and image editing skill powered by an OpenAI-compatible `gpt-image-2` Images API.
+- [`gpt-imagegen`](skills/gpt-imagegen/) - OpenAI-compatible Images API skill using `gpt-image-2.5-flare` for generation and `gpt-image-2.5-sunburst` for editing, with transparent backgrounds and experimental native 4K output.
 
 ## Installation
 

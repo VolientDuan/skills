@@ -28,7 +28,8 @@ from pathlib import Path
 
 DEFAULT_BASE_URL = ""
 RECOMMENDED_BASE_URL = "https://examine.com"
-DEFAULT_MODEL = "gpt-image-2"
+DEFAULT_MODEL = "gpt-image-2.5-flare"
+DEFAULT_EDIT_MODEL = "gpt-image-2.5-sunburst"
 PLACEHOLDER_API_KEY = "YOUR_API_KEY"
 DEFAULT_TIMEOUT = 300
 DEFAULT_PARTIAL_IMAGES = 2
@@ -83,8 +84,17 @@ URL_PATTERN = re.compile(
 SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 LEGACY_SUPPORTED_API_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
-OFFICIAL_GUIDE_IMAGE_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
-OFFICIAL_GPT_IMAGE_QUALITIES = {"auto", "low", "medium", "high"}
+GPT_IMAGE_25_MODELS = {
+    DEFAULT_MODEL,
+    DEFAULT_EDIT_MODEL,
+    "gpt-image-2.5-flare-2026-09-08",
+    "gpt-image-2.5-sunburst-2026-09-08",
+}
+OFFICIAL_GPT_IMAGE_QUALITIES = {"auto", "low", "medium", "high", "xhigh", "max"}
+MIN_IMAGE_PIXELS = 655_360
+MAX_IMAGE_PIXELS = 8_294_400
+MAX_IMAGE_EDGE = 3840
+EXPERIMENTAL_IMAGE_PIXELS = 2560 * 1440
 FICTIONAL_WATERMARK_TEXT = "Fictional dramatization"
 WATERMARK_PARODY_KEYWORDS = (
     "satire",
@@ -196,7 +206,11 @@ class ParsedURL:
 
 
 def is_gpt_image_2_model(model: str) -> bool:
-    return model.strip().lower() == "gpt-image-2"
+    return model.strip().lower() in {"gpt-image-2", "gpt-image-2-2026-04-21"}
+
+
+def is_gpt_image_25_model(model: str) -> bool:
+    return model.strip().lower() in GPT_IMAGE_25_MODELS
 
 
 def default_config_path(app_name: str) -> Path:
@@ -275,7 +289,15 @@ def parse_args() -> argparse.Namespace:
         default="generated-image.png",
         help="Output image path. Parent directories are created automatically.",
     )
-    parser.add_argument("--size", default="1024x1024", help="Image size.")
+    parser.add_argument(
+        "--size",
+        default="1024x1024",
+        help=(
+            "Image size or auto. GPT Image 2/2.5 support custom WIDTHxHEIGHT: "
+            "multiples of 16, aspect ratio 1:3 to 3:1, edges <=3840, "
+            "655360-8294400 pixels. Above 2560x1440 is experimental."
+        ),
+    )
     parser.add_argument(
         "--count",
         type=int,
@@ -296,7 +318,7 @@ def parse_args() -> argparse.Namespace:
         "--quality",
         choices=tuple(sorted(OFFICIAL_GPT_IMAGE_QUALITIES)),
         default="high",
-        help="Image quality.",
+        help="Image quality. xhigh and max require GPT Image 2.5.",
     )
     parser.add_argument(
         "--output-format",
@@ -318,14 +340,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--moderation",
         choices=("auto", "low"),
-        help="Optional moderation strictness for supported GPT Image models.",
+        help="Optional moderation strictness for generation requests only.",
     )
     parser.add_argument(
         "--input-fidelity",
         choices=("low", "high"),
         help="Optional input preservation level for edit/composition requests.",
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Image model.")
+    parser.add_argument(
+        "--model",
+        help=(
+            f"Override the image model. Defaults to {DEFAULT_MODEL} for text-to-image "
+            f"or {DEFAULT_EDIT_MODEL} when --image is provided."
+        ),
+    )
     parser.add_argument(
         "--base-url",
         default=os.environ.get("GPT_IMAGE_BASE_URL")
@@ -409,7 +437,12 @@ def parse_args() -> argparse.Namespace:
         default=60,
         help="Maximum retry delay in seconds when the API suggests retry_after.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.model is None:
+        args.model = DEFAULT_EDIT_MODEL if args.images else DEFAULT_MODEL
+    if args.background == "transparent" and args.output_format is None:
+        args.output_format = "png"
+    return args
 
 
 def configuration_help() -> str:
@@ -476,26 +509,32 @@ def normalize_api_size(
     model: str = DEFAULT_MODEL,
 ) -> tuple[str, str | None]:
     normalized = size.strip().lower()
-    if is_gpt_image_2_model(model):
-        if normalized in OFFICIAL_GUIDE_IMAGE_SIZES:
+    if is_gpt_image_2_model(model) or is_gpt_image_25_model(model):
+        if normalized == "auto":
             return normalized, resize_output
-        parse_dimensions(normalized, "size")
-        raise RuntimeError(
-            f"gpt-image-2 size {size!r} is outside the official image generation guide "
-            f"set {sorted(OFFICIAL_GUIDE_IMAGE_SIZES)}. Use one of those values for "
-            "--size and put the desired final dimensions in --resize-output."
-        )
+        width, height = parse_dimensions(normalized, "size")
+        if width % 16 or height % 16:
+            raise RuntimeError("--size width and height must both be multiples of 16.")
+        if max(width, height) > MAX_IMAGE_EDGE:
+            raise RuntimeError(f"--size neither edge may exceed {MAX_IMAGE_EDGE} pixels.")
+        if max(width, height) > 3 * min(width, height):
+            raise RuntimeError("--size aspect ratio must be between 1:3 and 3:1.")
+        if not MIN_IMAGE_PIXELS <= width * height <= MAX_IMAGE_PIXELS:
+            raise RuntimeError(
+                f"--size total pixels must be between {MIN_IMAGE_PIXELS:,} "
+                f"and {MAX_IMAGE_PIXELS:,}."
+            )
+        return normalized, resize_output
 
     supported_sizes = LEGACY_SUPPORTED_API_SIZES
     if normalized in supported_sizes:
         return normalized, resize_output
     parse_dimensions(normalized, "size")
-    if resize_output:
-        raise RuntimeError(
-            f"API size {size!r} is not one of {sorted(supported_sizes)}. "
-            "Use a supported --size and put the final dimensions in --resize-output."
-        )
-    return "1024x1024", normalized
+    raise RuntimeError(
+        f"API size {size!r} is not supported by this script for model {model!r}. "
+        f"Use one of {sorted(supported_sizes)} for --size and explicitly set "
+        "--resize-output for local resizing."
+    )
 
 
 def parse_url(url: str) -> ParsedURL:
@@ -1585,6 +1624,15 @@ def validate_official_request_constraints(args: argparse.Namespace) -> None:
             "--count must be between 1 and 10 according to the official Images API."
         )
 
+    if args.quality in {"xhigh", "max"} and not is_gpt_image_25_model(args.model):
+        raise RuntimeError("--quality xhigh and max require a documented GPT Image 2.5 model.")
+
+    if args.input_fidelity is not None and not args.images:
+        raise RuntimeError("--input-fidelity is only valid for edits with --image.")
+
+    if args.images and args.moderation is not None:
+        raise RuntimeError("--moderation is only documented for generation requests, not edits.")
+
     if args.input_fidelity is not None and is_gpt_image_2_model(args.model):
         raise RuntimeError(
             "--input-fidelity is blocked for gpt-image-2 because the official image "
@@ -1598,13 +1646,6 @@ def validate_official_request_constraints(args: argparse.Namespace) -> None:
     if args.output_compression is not None and args.output_format not in {"jpeg", "webp"}:
         raise RuntimeError(
             "--output-compression is only valid together with --output-format jpeg or webp."
-        )
-
-    if args.background == "transparent" and is_gpt_image_2_model(args.model):
-        raise RuntimeError(
-            "--background transparent is blocked for gpt-image-2 because the official "
-            "image generation guide says transparent backgrounds are not currently "
-            "supported by gpt-image-2."
         )
 
     if args.background == "transparent" and args.output_format == "jpeg":
@@ -1647,7 +1688,6 @@ def image_payload_fields(args: argparse.Namespace) -> list[tuple[str, str]]:
     optional_values = {
         "output_format": args.output_format,
         "background": args.background,
-        "moderation": args.moderation,
     }
     if args.input_fidelity is not None:
         optional_values["input_fidelity"] = args.input_fidelity
@@ -1682,8 +1722,6 @@ def image_payload_json(args: argparse.Namespace) -> dict:
         "background": args.background,
         "moderation": args.moderation,
     }
-    if args.input_fidelity is not None:
-        optional_values["input_fidelity"] = args.input_fidelity
     for key, value in optional_values.items():
         if value is not None:
             payload[key] = value
@@ -1712,6 +1750,13 @@ def main() -> int:
         args.resize_output,
         args.model,
     )
+    if args.size != "auto":
+        width, height = parse_dimensions(args.size)
+        if width * height > EXPERIMENTAL_IMAGE_PIXELS:
+            print(
+                "Note: native resolutions above 2560x1440 are experimental in the OpenAI API.",
+                file=sys.stderr,
+            )
     validate_configuration(args.base_url, args.api_key)
     args.prompt = prepare_prompt(args)
     if args.mask and not args.images:
@@ -1779,6 +1824,7 @@ def main() -> int:
         json.dumps(
             {
                 "operation": operation,
+                "model": args.model,
                 "output": saved_outputs[0],
                 "outputs": saved_outputs,
                 "requested_count": args.count,

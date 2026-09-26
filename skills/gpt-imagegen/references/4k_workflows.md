@@ -2,16 +2,36 @@
 
 Use this reference when a user asks for 4K output, zoomable texture, upscaling, tile stitching, seam repair, or close-up material detail such as leaf veins, brick grain, stone joints, water ripples, bark, fabric weave, or roof tiles.
 
-## Hard Constraints
+## Native 4K First
 
-- Do not request native `3840x2160` from `gpt-image-2`.
-- Use only official request sizes for `gpt-image-2`: `1024x1024`, `1536x1024`, `1024x1536`, or `auto`.
-- Do all non-standard canvas assembly, cropping, resizing, sharpening, and delivery sizing locally.
-- A 4K resize only makes a large file. Visible detail must come from a real high-detail source, dedicated super-resolution, or carefully constrained local detail transfer.
+As checked on 2026-09-25, the [official Image generation guide](https://developers.openai.com/api/docs/guides/image-generation#size-and-quality-options) supports native `3840x2160` and `2160x3840` for `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst`, including their `2026-09-08` snapshots. GPT Image 2 also supports these sizes. Resolutions above `2560x1440` are experimental.
 
-## Preferred Production Path
+For new 4K output, request the native dimensions directly:
 
-For production-quality 4K texture, prefer:
+```bash
+python3 scripts/generate_image.py \
+  --prompt "A detailed photorealistic West Lake landscape at sunset" \
+  --size 3840x2160 \
+  --quality xhigh \
+  --output ./scene-4k.png
+```
+
+This selects Flare. Add `--image ./source.png` to edit with Sunburst. `xhigh` and `max` are GPT Image 2.5 quality settings; higher quality can increase latency and cost and is independent of pixel dimensions.
+
+Custom sizes must satisfy all of these constraints:
+
+- Both dimensions are multiples of 16.
+- Neither edge exceeds 3840 pixels.
+- Aspect ratio is between 1:3 and 3:1.
+- Total pixels are between 655,360 and 8,294,400 inclusive.
+
+`4096x2160`, `4096x4096`, and ultra-wide `3840x1080` are outside these limits. Use a valid source size and explicit local cropping/resizing if such a canvas is required. Do not silently downgrade a native 4K request to a low-resolution image followed by resizing.
+
+Inspect actual returned dimensions and 100% crops. A compatible provider may not implement every documented feature; report its error or size mismatch. For transparent 4K, add `--background transparent --output-format png` (WebP also works), and verify real alpha transparency.
+
+## Local Upscaling Fallback
+
+Use this path when native generation is unavailable, the existing source must be preserved, or its texture needs further work. A 4K resize only makes a larger file; detail must come from a high-detail source, dedicated super-resolution, or carefully constrained detail transfer.
 
 1. Generate or select a stable base composition at an official size such as `1536x1024`.
 2. Create the target canvas locally with `tile_canvas.py prepare`.
@@ -39,7 +59,7 @@ python3 scripts/tile_canvas.py enhance \
 
 ## Tiled Detail Path
 
-Use `8x8` as the normal production grid for 4K texture work. Use `4x4` for quick drafts or broad local repair. Use selective `16x16` only for stubborn fine-detail regions such as willow leaves, grass, hair, fabric weave, carved ornament, and foreground stone texture.
+Only use tiles when the whole-image paths above are insufficient. Start with representative `8x8` test tiles for 4K texture work. Use `4x4` for quick drafts or broad local repair. Use selective `16x16` only for stubborn fine-detail regions such as willow leaves, grass, hair, fabric weave, carved ornament, and foreground stone texture.
 
 ```bash
 python3 scripts/tile_canvas.py split \
@@ -81,7 +101,7 @@ Use `stitch-slots` only when generated tiles are visually stable. Treat overlap 
 
 The proposed workflow `1536x1024 base -> 2x2 tiles -> each tile edited to 1536x1024 -> local 4K postprocess` is API-compliant but not production-grade for close-up texture.
 
-Observed West Lake Broken Bridge sunset test:
+Historical West Lake Broken Bridge sunset test (not a benchmark of GPT Image 2.5):
 
 - Four generated tiles stitch to `3072x2048`, then local postprocess can crop/resize to `3840x2160`.
 - Rough texture score improved only about `1.11x-1.13x` over ordinary upscale after seam-safe blending.

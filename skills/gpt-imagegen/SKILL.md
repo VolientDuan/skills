@@ -66,30 +66,61 @@ python3 scripts/generate_image.py \
   --output ./tea-variant.png
 ```
 
+Generate a transparent asset:
+
+```bash
+python3 scripts/generate_image.py \
+  --prompt "A ceramic tea cup, isolated with a transparent background" \
+  --background transparent \
+  --output-format png \
+  --output ./tea-cup.png
+```
+
+Request native 4K (experimental above `2560x1440`):
+
+```bash
+python3 scripts/generate_image.py \
+  --prompt "A detailed panoramic mountain landscape at sunrise" \
+  --size 3840x2160 \
+  --quality xhigh \
+  --output ./landscape-4k.png
+```
+
 The generation script defaults to:
 
-- Model: `gpt-image-2`
+- Text-to-image model: `gpt-image-2.5-flare`
+- Editing/reference/composition model: `gpt-image-2.5-sunburst`, selected whenever `--image` is present
+- Explicit `--model` overrides either default, including documented `2026-09-08` snapshots
 - Size: `1024x1024`
-- Quality: `high`
+- Quality: `high` (this skill's existing default; the API itself defaults to `auto`)
 - Timeout: `300` seconds
 - Transport: non-streaming JSON; use `--stream` only when intentionally requesting the official SSE event flow
 
 ## Compatibility Gate
 
-Treat the official OpenAI Images API guide/reference as the source of truth for request fields. Do not infer support from a third-party compatible provider, old examples, or a model alias.
+Treat the official OpenAI Images API guide/reference as the source of truth for request fields. Last checked: **2026-09-25**.
+
+- [Image generation guide](https://developers.openai.com/api/docs/guides/image-generation#customize-image-output): model capabilities, custom sizes, transparency, and quality.
+- [Create image](https://developers.openai.com/api/reference/python/resources/images/methods/generate/): JSON generation parameters.
+- [Create image edit](https://developers.openai.com/api/reference/python/resources/images/methods/edit/): multipart editing parameters.
+
+Do not infer support from a third-party compatible provider or an unrecognized model alias. Providers may lag behind the official API; report unsupported models/parameters without silently switching models or replacing native output with a resize.
 
 Before every request, check:
 
 - Send only fields documented for the chosen request shape.
-- For `gpt-image-2`, use only `1024x1024`, `1536x1024`, `1024x1536`, or `auto`.
-- Do not request native `3840x2160` from `gpt-image-2`; do 4K assembly locally.
-- Omit `--input-fidelity` for `gpt-image-2`; the official guide says it automatically uses high input fidelity.
-- Reject `--background transparent` for `gpt-image-2`.
+- Both GPT Image 2.5 models and their `2026-09-08` snapshots support `auto` or custom `WIDTHxHEIGHT`: both edges must be multiples of 16, neither may exceed 3840, aspect ratio must be between 1:3 and 3:1, and total pixels must be between 655,360 and 8,294,400 inclusive.
+- `3840x2160` and `2160x3840` are valid native requests. Resolutions above `2560x1440` are experimental; `4096x4096` and `4096x2160` exceed the documented limits.
+- GPT Image 2.5 supports `auto`, `low`, `medium`, `high`, `xhigh`, and `max` quality. Earlier models do not support `xhigh` or `max`.
+- Transparent output requires `--background transparent` with PNG or WebP; the script selects PNG when the format is omitted and rejects JPEG. Match the output filename extension to the chosen format.
+- `gpt-image-2` and its `2026-04-21` snapshot also support custom sizes under the same limits; transparent backgrounds are in preview. Omit `--input-fidelity` for those models because they automatically use high input fidelity.
+- `--input-fidelity` is edit-only and remains optional for GPT Image 2.5. `--moderation` is generation-only in the current Images API reference.
+- `--output-compression 0-100` requires JPEG or WebP.
 - Keep `--count` at `10` or below.
-- Use `--resize-output` for final dimensions outside the official API size set.
+- Use `--resize-output` only for an explicit local PNG resize after a valid API size; invalid native sizes fail instead of silently falling back to a resized `1024x1024` image.
 - Use `--stream` only intentionally; non-streaming is the default.
 
-When OpenAI docs disagree, prefer the Images API guide and reference pages for request construction. This skill follows the guide's streaming examples for actual request formatting while keeping the doc conflict visible in script notes.
+Use the guide for capabilities and the endpoint reference for request fields. The reference's `stream: false` signature describes its non-streaming overload; streaming uses the guide's SSE flow.
 
 ## Configuration Gate
 
@@ -127,15 +158,11 @@ Legacy `DCHA_IMAGE_*` environment variables and config files are accepted as mig
 
 For any request involving 4K, high pixel density, zoomable texture, tiled generation, seam repair, or "放大后能看到细节", load `references/4k_workflows.md`.
 
-Core rules:
+Prefer a native `--size 3840x2160` request for new 4K images. For editing, add `--image` and keep the same size to use Sunburst. Explain that this resolution is experimental; inspect the returned dimensions and 100% crops before delivery.
 
-- Do not promise native 4K from the API.
-- A simple resize does not create real detail.
-- Do not use `2x2` four-block supersampling as the production path for close-up texture.
-- Our West Lake tests showed `2x2` tile generation caused seams, ghosting, rectangular patches, or only negligible texture gain.
-- Prefer whole-image super-resolution first when available, then GPT edits for small repairs.
-- If using GPT tiles, prefer `8x8` test tiles, selective `16x16`, and high-frequency/detail-transfer workflows over direct tile pasting.
-- Inspect 100% crops before delivery; thumbnails hide seam and texture artifacts.
+A simple resize does not create real detail. Use local resizing, whole-image super-resolution, or the existing tile workflows only when the native result is unavailable or does not meet the task. The reference preserves prior tile experiments as fallback guidance.
+
+For transparent assets, verify that the output has an alpha channel with transparent pixels; a checkerboard or white background painted into the image is not transparency.
 
 ## Prompt Clarification On Failures
 
@@ -174,14 +201,16 @@ Common `generate_image.py` options:
 - `--image`: optional input image path or HTTPS URL; repeat for multi-image composition.
 - `--mask`: optional mask image path or HTTPS URL for localized edits.
 - `--output`: output path; parent directories are created automatically.
-- `--size`: `1024x1024`, `1536x1024`, `1024x1536`, or `auto` for `gpt-image-2`.
+- `--size`: `auto` or native dimensions under the compatibility gate, including `1536x864`, `2048x2048`, and `3840x2160`.
 - `--count`: number of final images to request.
 - `--resize-output`: local final PNG resize for unsupported final dimensions.
-- `--quality`: `auto`, `low`, `medium`, or `high`.
+- `--quality`: `auto`, `low`, `medium`, `high`, `xhigh`, or `max`; the last two require GPT Image 2.5.
 - `--output-format`: `png`, `jpeg`, or `webp`.
-- `--background`: `auto`, `opaque`, or `transparent`; transparent is blocked for `gpt-image-2`.
-- `--moderation`: `auto` or `low`.
-- `--model`: default `gpt-image-2`.
+- `--output-compression`: `0-100`, only with JPEG/WebP.
+- `--background`: `auto`, `opaque`, or `transparent`; transparency requires PNG/WebP.
+- `--moderation`: `auto` or `low`, generation only.
+- `--input-fidelity`: `low` or `high`, optional for GPT Image 2.5 edits; omitted by default.
+- `--model`: override automatic Flare (generation) / Sunburst (editing) selection.
 - `--stream` / `--no-stream`: SSE streaming opt-in or normal JSON.
 - `--raw-prompt`: send prompt exactly as provided.
 - `--fictional-watermark`: `auto`, `always`, or `never`.
@@ -210,5 +239,11 @@ Important `tile_canvas.py` commands:
 - Edit/composition calls `/v1/images/edits` with multipart uploads.
 - Multiple images are sent as repeated `image[]` form fields.
 - Streaming expects official event shapes: `image_generation.partial_image`, `image_edit.partial_image`, `image_generation.completed`, and `image_edit.completed`.
-- The script does not write raw API metadata files; return output paths and concise command output.
+- The script does not write raw API metadata files; its JSON summary includes the selected model, requested API size, optional local resize, and output paths. Requested size alone does not prove the provider returned that resolution.
 - If the API returns an error, summarize status code and message, then adjust parameters or ask for missing details only when needed.
+
+Run offline request regression tests after changing model routing or API constraints:
+
+```bash
+python3 -m unittest discover -s tests -v
+```

@@ -18,7 +18,7 @@ skills/
 
 ## 已包含的 Skills
 
-- [`gpt-imagegen`](skills/gpt-imagegen/) - 基于 OpenAI 兼容 `gpt-image-2` Images API 的图片生成与图片编辑 skill。
+- [`gpt-imagegen`](skills/gpt-imagegen/) - 基于 OpenAI 兼容 Images API，文生图默认使用 `gpt-image-2.5-flare`，编辑默认使用 `gpt-image-2.5-sunburst`，支持透明背景与原生 4K（实验性）。
 
 ## 安装
 
